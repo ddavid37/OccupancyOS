@@ -1,11 +1,13 @@
 """
 Hotel Operational Ontology Ingestion
-Produces two clean CSVs for Palantir Foundry:
+Produces three clean CSVs for Palantir Foundry:
   - bookings_core.csv
   - arrival_metadata.csv
+  - booking_financials.csv
 """
 
 import hashlib
+import numpy as np
 import pandas as pd
 
 # ── 1. Load ────────────────────────────────────────────────────────────────────
@@ -43,7 +45,40 @@ total_ids = df["booking_id"].nunique()
 assert total_ids == len(df), f"Duplicate booking_ids found! ({total_ids} unique / {len(df)} rows)"
 print(f"Unique booking_ids : {total_ids:,}  (all {len(df):,} rows distinct)")
 
-# ── 5. Build output frames ────────────────────────────────────────────────────
+# ── 5. Simulate realistic total_cost ─────────────────────────────────────────
+# Base nightly rates (USD) per hotel type
+BASE_RATE = {
+    "Resort Hotel": 220,
+    "City Hotel":   130,
+}
+
+# Seasonal multiplier keyed on arrival month
+# Peak: Jun–Aug  |  Shoulder: Apr–May, Sep–Oct  |  Low: Nov–Mar
+SEASON_MULT = {
+    1: 0.80, 2: 0.80, 3: 0.85,
+    4: 0.95, 5: 1.00,
+    6: 1.20, 7: 1.35, 8: 1.30,
+    9: 1.10, 10: 0.95,
+    11: 0.85, 12: 0.90,
+}
+
+rng = np.random.default_rng(seed=42)
+
+def simulate_total_cost(row):
+    base        = BASE_RATE.get(row["hotel"], 150)
+    season      = SEASON_MULT.get(row["arrival_date_month"], 1.0)
+    # Per-night rate with +/-15% random spread for natural variance
+    nightly     = base * season * rng.uniform(0.85, 1.15)
+    nights      = max(row["stay_duration"], 1)   # at least 1 night billed
+    full_cost   = round(nightly * nights, 2)
+    # Canceled: charge 20% cancellation fee
+    if row["is_canceled"] == 1:
+        return round(full_cost * 0.20, 2)
+    return full_cost
+
+df["total_cost"] = df.apply(simulate_total_cost, axis=1)
+
+# ── 6. Build output frames ────────────────────────────────────────────────────
 bookings_core = df[[
     "booking_id", "hotel", "is_canceled",
     "lead_time", "total_guests", "stay_duration",
@@ -54,17 +89,28 @@ arrival_metadata = df[[
     "arrival_date_day_of_month", "stays_in_weekend_nights",
 ]].copy()
 
-# ── 6. Null audit ─────────────────────────────────────────────────────────────
-for name, frame in [("bookings_core", bookings_core), ("arrival_metadata", arrival_metadata)]:
+booking_financials = df[[
+    "booking_id", "hotel", "is_canceled", "stay_duration", "total_cost",
+]].copy()
+
+# ── 7. Null audit ─────────────────────────────────────────────────────────────
+frames = [
+    ("bookings_core",      bookings_core),
+    ("arrival_metadata",   arrival_metadata),
+    ("booking_financials", booking_financials),
+]
+for name, frame in frames:
     null_total = frame.isnull().sum().sum()
     assert null_total == 0, f"[{name}] still contains {null_total} null value(s)!"
-    print(f"{name:20s}: {len(frame):,} rows | nulls = {null_total}")
+    print(f"{name:22s}: {len(frame):,} rows | nulls = {null_total}")
 
-# ── 7. Export ─────────────────────────────────────────────────────────────────
-bookings_core.to_csv(    f"{OUT_DIR}\\bookings_core.csv",     index=False)
-arrival_metadata.to_csv( f"{OUT_DIR}\\arrival_metadata.csv",  index=False)
+# ── 8. Export ─────────────────────────────────────────────────────────────────
+bookings_core.to_csv(     f"{OUT_DIR}\\bookings_core.csv",      index=False)
+arrival_metadata.to_csv(  f"{OUT_DIR}\\arrival_metadata.csv",   index=False)
+booking_financials.to_csv(f"{OUT_DIR}\\booking_financials.csv", index=False)
 
 print("\nExported:")
-print(f"  bookings_core.csv    : {OUT_DIR}\\bookings_core.csv")
-print(f"  arrival_metadata.csv : {OUT_DIR}\\arrival_metadata.csv")
+print(f"  bookings_core.csv      : {OUT_DIR}\\bookings_core.csv")
+print(f"  arrival_metadata.csv   : {OUT_DIR}\\arrival_metadata.csv")
+print(f"  booking_financials.csv : {OUT_DIR}\\booking_financials.csv")
 print("Done.")
